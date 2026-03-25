@@ -15,7 +15,6 @@
 #include "driver/configuration.h"
 #include "driver/wivrn_connection.h"
 #include "exit_codes.h"
-#include "hostname.h"
 #include "ipc_server_cb.h"
 #include "protocol_version.h"
 #include "start_application.h"
@@ -35,6 +34,7 @@
 #include <filesystem>
 #include <iostream>
 #include <libnotify/notification.h>
+#include <magic_enum.hpp>
 #include <memory>
 #include <poll.h>
 #include <random>
@@ -243,6 +243,10 @@ void start_server(configuration config)
 
 		setenv("AMD_DEBUG", "lowlatencyenc", false);
 
+		// https://github.com/WiVRn/WiVRn/issues/695
+		// something is broken with Intel CCS under vaapi
+		setenv("INTEL_DEBUG", "noccs", false);
+
 		wivrn::ipc_server_cb server_cb;
 
 		ipc_server_main_info server_info{
@@ -311,7 +315,7 @@ void start_listening()
 
 	assert(listener_watch == 0);
 
-	listener = std::make_unique<TCPListener>(wivrn::default_port);
+	listener = std::make_unique<TCPListener>(configuration().port);
 	auto source_listener = g_unix_fd_source_new(listener->get_fd(), GIOCondition::G_IO_IN);
 	g_source_set_callback(source_listener, G_SOURCE_FUNC(&headset_connected), nullptr, nullptr);
 	listener_watch = g_source_attach(source_listener, nullptr);
@@ -348,7 +352,8 @@ void start_publishing()
 			        {"version", wivrn::display_version()},
 			        {"cookie", server_cookie()},
 			};
-			publisher.emplace(poll_api, hostname(), "_wivrn._tcp", wivrn::default_port, TXT);
+			auto configuration = wivrn::configuration();
+			publisher.emplace(poll_api, configuration.hostname, "_wivrn._tcp", configuration.port, TXT);
 		}
 	}
 }
@@ -533,6 +538,10 @@ gboolean control_received(gint fd, GIOCondition condition, gpointer user_data)
 			                   start_publishing();
 			                   inhibitor.reset();
 			                   wivrn_server_set_headset_connected(dbus_server, false);
+			                   wivrn_server_set_client_tab(dbus_server, "");
+		                   },
+		                   [&](const wivrn::from_headset::stream_tab_changed & event) {
+			                   wivrn_server_set_client_tab(dbus_server, magic_enum::enum_name(event.tab).data());
 		                   },
 		                   [&](const from_monado::server_error & e) {
 			                   wivrn_server_emit_server_error(dbus_server, e.where.c_str(), e.message.c_str());
@@ -653,6 +662,15 @@ gboolean on_handle_rename_key(WivrnServer * skeleton, GDBusMethodInvocation * in
 
 gboolean on_handle_enable_pairing(WivrnServer * skeleton, GDBusMethodInvocation * invocation, gpointer user_data)
 {
+	bool server_running = server_watch != 0 or connection_thread;
+	if (server_running)
+	{
+		std::cerr << "Cannot enable pairing while session is active." << pin << std::endl;
+		g_dbus_method_invocation_return_value(invocation, g_variant_new("(s)", ""));
+
+		return G_SOURCE_CONTINUE;
+	}
+
 	set_encryption_state(wivrn_connection::encryption_state::pairing);
 
 	if (pairing_timeout)
@@ -678,6 +696,29 @@ gboolean on_handle_disable_pairing(WivrnServer * skeleton, GDBusMethodInvocation
 {
 	set_encryption_state(wivrn_connection::encryption_state::enabled);
 	g_dbus_method_invocation_return_value(invocation, nullptr);
+	return G_SOURCE_CONTINUE;
+}
+
+gboolean on_handle_set_client_tab(WivrnServer * skeleton, GDBusMethodInvocation * invocation, gpointer user_data)
+{
+	GVariant * args = g_dbus_method_invocation_get_parameters(invocation);
+	char * c_tab;
+	g_variant_get_child(args, 0, "s", &c_tab);
+	std::string tab(c_tab);
+	g_free(c_tab);
+
+	for (auto [val, name]: magic_enum::enum_entries<stream_tab>())
+	{
+		if (tab == name)
+		{
+			wivrn_ipc_socket_main_loop->send(to_headset::stream_tab_change{.tab = val});
+			g_dbus_method_invocation_return_value(invocation, nullptr);
+			return G_SOURCE_CONTINUE;
+		}
+	}
+
+	std::cerr << "Invalid tab name " << tab << std::endl;
+	g_dbus_method_invocation_return_dbus_error(invocation, "io.github.wivrn.Server.InvalidTab", "invalid tab");
 	return G_SOURCE_CONTINUE;
 }
 
@@ -828,6 +869,8 @@ void on_name_acquired(GDBusConnection * connection, const gchar * name, gpointer
 		                 NULL);
 	}
 
+	g_signal_connect(dbus_server, "handle-set-client-tab", G_CALLBACK(on_handle_set_client_tab), NULL);
+
 	wivrn_server_set_steam_command(dbus_server, steam_command().c_str());
 
 	on_headset_info_packet({});
@@ -857,6 +900,8 @@ void on_name_acquired(GDBusConnection * connection, const gchar * name, gpointer
 		set_encryption_state(wivrn_connection::encryption_state::pairing);
 	else
 		set_encryption_state(enc_state);
+
+	wivrn_server_set_client_tab(dbus_server, "");
 }
 
 auto create_dbus_connection()

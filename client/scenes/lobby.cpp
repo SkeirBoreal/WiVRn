@@ -157,15 +157,6 @@ scenes::lobby::lobby() :
 	else
 		spdlog::info("Composition layer color scale/bias NOT supported");
 
-	if (instance.has_extension(XR_FB_FOVEATION_VULKAN_EXTENSION_NAME) and
-	    instance.has_extension(XR_FB_FOVEATION_CONFIGURATION_EXTENSION_NAME))
-	{
-		spdlog::info("Foveation image supported");
-		foveation = xr::foveation_profile(instance, session, XR_FOVEATION_LEVEL_NONE_FB, -10, false);
-	}
-	else
-		spdlog::info("Foveation image NOT supported");
-
 	if (std::getenv("WIVRN_AUTOCONNECT"))
 		force_autoconnect = true;
 
@@ -350,12 +341,7 @@ std::unique_ptr<wivrn_session> scenes::lobby::connect_to_session(wivrn_discover:
 
 void scenes::lobby::update_server_list()
 {
-	if (application::is_focused() && !discover)
-		discover.emplace();
-	else if (!application::is_focused() && discover)
-		discover.reset();
-
-	if (!discover)
+	if (not discover)
 		return;
 
 	std::vector<wivrn_discover::service> discovered_services = discover->get_services();
@@ -626,28 +612,7 @@ std::optional<glm::vec3> scenes::lobby::check_recenter_gui(glm::vec3 head_positi
 	return std::nullopt;
 }
 
-// Return the vector v such that dot(v, x) > 0 iff x is on the side where the composition layer is visible
-static glm::vec4 compute_ray_limits(const XrPosef & pose, float margin = 0)
-{
-	glm::quat q{
-	        pose.orientation.w,
-	        pose.orientation.x,
-	        pose.orientation.y,
-	        pose.orientation.z,
-	};
-
-	glm::vec3 p{
-	        pose.position.x,
-	        pose.position.y,
-	        pose.position.z,
-	};
-
-	glm::vec3 normal = glm::column(glm::mat3_cast(q), 2);
-
-	return glm::vec4(normal, -glm::dot(p, normal) - margin);
-}
-
-static void stick_finger_to_gui(std::array<xr::hand_tracker::joint, XR_HAND_JOINT_COUNT_EXT> & hand, const std::vector<imgui_context::viewport> & layers)
+static void stick_finger_to_gui(std::array<xr::hand_tracker::joint, XR_HAND_JOINT_COUNT_EXT> & hand, const std::vector<imgui_context::window_viewport> & layers)
 {
 	// Move XR_HAND_JOINT_INDEX_{TIP,DISTAL,INTERMEDIATE,PROXIMAL}_EXT so that:
 	// - Only the X rotation changes for distal and intermediate (relative to the parent bone)
@@ -667,7 +632,7 @@ static void stick_finger_to_gui(std::array<xr::hand_tracker::joint, XR_HAND_JOIN
 
 	// Compute the target position of the tip
 	std::vector<std::pair<glm::vec3, float>> intersections; // Target position of the finger tip, distance to the GUI plane
-	for (const imgui_context::viewport & layer: layers)
+	for (const imgui_context::window_viewport & layer: layers)
 	{
 		// Ignore layers that are not absolutely positionned
 		if (layer.space != xr::spaces::world)
@@ -903,10 +868,19 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 
 	if (next_scene)
 	{
-		if (!next_scene->alive())
-			next_scene.reset();
-		else if (next_scene->current_state() == scenes::stream::state::streaming)
-			application::push_scene(next_scene);
+		switch (next_scene->current_state())
+		{
+			case scenes::stream::state::streaming:
+				application::push_scene(next_scene);
+				break;
+
+			case scenes::stream::state::shutdown:
+				current_tab = tab::server_list;
+				break;
+
+			default:
+				break;
+		}
 	}
 
 	update_server_list();
@@ -973,14 +947,14 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 		auto windows = imgui_ctx->windows();
 
 		auto left = left_hand->locate(world_space, frame_state.predictedDisplayTime);
-		if (left and xr::hand_tracker::check_flags(*left, XR_SPACE_LOCATION_POSITION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT, 0))
+		if (left)
 		{
 			stick_finger_to_gui(*left, windows);
 			hide_left_controller = true;
 		}
 
 		auto right = right_hand->locate(world_space, frame_state.predictedDisplayTime);
-		if (right and xr::hand_tracker::check_flags(*right, XR_SPACE_LOCATION_POSITION_TRACKED_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT, 0))
+		if (right)
 		{
 			stick_finger_to_gui(*right, windows);
 			hide_right_controller = true;
@@ -1054,11 +1028,11 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 #endif
 
 	// Get the planes that limit the ray size from the composition layers
-	std::vector<glm::vec4> ray_limits;
-	for (auto & [z_index, layer]: imgui_layers)
+	std::vector<glm::mat4> world_to_window;
+	for (auto & window: imgui_ctx->windows())
 	{
-		if (z_index != constants::lobby::zindex_recenter_tip)
-			ray_limits.push_back(compute_ray_limits(layer.pose));
+		if (window.space == xr::spaces::world)
+			world_to_window.push_back(glm::inverse(glm::translate(window.position) * glm::mat4(glm::mat3_cast(window.orientation)) * glm::scale(glm::vec3(window.size, 1))));
 	}
 
 	input->apply(world,
@@ -1068,7 +1042,7 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 	             not imgui_ctx->is_aim_interaction()[0],
 	             hide_right_controller,
 	             not imgui_ctx->is_aim_interaction()[1],
-	             ray_limits);
+	             world_to_window);
 
 	renderer::animate(world, frame_state.predictedDisplayPeriod * 1.0e-9);
 
@@ -1086,7 +1060,6 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 	        composition_layer_depth_test_supported,
 	        composition_layer_depth_test_supported ? layer_lobby | layer_controllers : layer_lobby,
 	        clear_color,
-	        foveation,
 	        true);
 
 	if (composition_layer_depth_test_supported)
@@ -1117,8 +1090,7 @@ void scenes::lobby::render(const XrFrameState & frame_state)
 	        height,
 	        composition_layer_depth_test_supported,
 	        composition_layer_depth_test_supported ? layer_rays : layer_rays | layer_controllers,
-	        {0, 0, 0, 0},
-	        foveation);
+	        {0, 0, 0, 0});
 
 	if (composition_layer_depth_test_supported)
 		set_depth_test(true, XR_COMPARE_OP_LESS_OR_EQUAL_FB);
@@ -1168,7 +1140,9 @@ void scenes::lobby::on_focused()
 	        *this,
 	        "assets://controllers/" + profile + "/profile.json",
 	        layer_controllers,
-	        layer_rays);
+	        layer_rays,
+	        get_action("left_trigger").first,
+	        get_action("right_trigger").first);
 
 	spdlog::info("Loaded input profile {}", input->id);
 
@@ -1264,7 +1238,17 @@ void scenes::lobby::on_focused()
 	                .vp_origin = {0, 1000},
 	                .vp_size = {1500, 300},
 	                .z_index = constants::lobby::zindex_recenter_tip,
-	        }};
+	        },
+	        {
+	                // Tooltip
+	                .space = xr::spaces::world,
+	                .size = {0.6, 0.08},
+	                .vp_origin = {0, 1300},
+	                .vp_size = {1500, 200},
+	                .tooltip_viewport = true,
+	                .z_index = constants::lobby::zindex_tooltip,
+	        },
+	};
 
 	xr::swapchain swapchain_imgui(instance, session, device, swapchain_format, 3000, 1500);
 
@@ -1277,8 +1261,6 @@ void scenes::lobby::on_focused()
 	        std::move(swapchain_imgui),
 	        vps,
 	        image_cache);
-
-	supported_codecs = wivrn::decoder::supported_codecs();
 
 	auto t = std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
 	auto tm = std::localtime(&t);
@@ -1338,8 +1320,8 @@ void scenes::lobby::on_focused()
 	std::ranges::sort(local_environments, std::less{});
 
 	setup_passthrough();
-	session.set_refresh_rate(application::get_config().preferred_refresh_rate.value_or(0));
 	multicast = application::get_wifi_lock().get_multicast_lock();
+	discover.emplace();
 
 	session.set_performance_level(XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
 	session.set_performance_level(XR_PERF_SETTINGS_DOMAIN_GPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
@@ -1371,7 +1353,6 @@ void scenes::lobby::on_unfocused()
 	right_hand.reset();
 	face_tracker.emplace<std::monostate>();
 
-	clear_swapchains();
 	multicast.reset();
 }
 
@@ -1380,9 +1361,7 @@ void scenes::lobby::on_xr_event(const xr::event & event)
 	switch (event.header.type)
 	{
 		case XR_TYPE_EVENT_DATA_SESSION_STATE_CHANGED:
-			if (event.state_changed.state == XR_SESSION_STATE_STOPPING)
-				discover.reset();
-			else if (event.state_changed.state == XR_SESSION_STATE_FOCUSED)
+			if (event.state_changed.state == XR_SESSION_STATE_FOCUSED)
 				autoconnect_enabled = true;
 			recenter_gui = true;
 			break;

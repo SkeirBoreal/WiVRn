@@ -249,17 +249,49 @@ void scenes::lobby::gui_enter_pin(locked_notifiable<pin_request_data> & pin_requ
 
 void scenes::lobby::gui_connected(XrTime predicted_display_time)
 {
-	if (not next_scene)
-	{
-		current_tab = tab::server_list;
-		return;
-	}
+	assert(next_scene);
 
 	if (next_scene->apps.draw_gui(*imgui_ctx, _("Disconnect")) == app_launcher::Cancel)
 	{
-		next_scene.reset();
+		next_scene->exit();
 		current_tab = tab::server_list;
 	}
+}
+
+void scenes::lobby::gui_disconnected()
+{
+	using constants::style::button_size;
+	std::string close_button_label = _("Close");
+
+	if (!async_error)
+	{
+		async_error = next_scene->pop_stream_error();
+
+		if (!async_error)
+		{
+			next_scene.reset();
+			ImGui::CloseCurrentPopup();
+			return;
+		}
+	}
+
+	ImGui::Dummy({1000, 1});
+
+	ImGui::PushFont(nullptr, constants::gui::font_size_large);
+	if (server_name == "")
+		CenterTextH(fmt::format(_F("Disconnected")));
+	else
+		CenterTextH(fmt::format(_F("Disconnected from {}"), server_name));
+	ImGui::PopFont();
+
+	ImGui::Text("%s", async_error->c_str());
+	ImGui::SetCursorPosX(ImGui::GetWindowContentRegionMax().x - button_size.x - ImGui::GetStyle().WindowPadding.x);
+
+	if (ImGui::Button(close_button_label.c_str(), button_size))
+	{
+		async_error.reset();
+	}
+	imgui_ctx->vibrate_on_hover();
 }
 
 void scenes::lobby::gui_new_server()
@@ -496,8 +528,12 @@ void scenes::lobby::gui_server_list()
 		config.save();
 	}
 
+	// Check if we need to report errors after a disconnect
+	if (next_scene and next_scene->current_state() == scenes::stream::state::shutdown and not ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup))
+		ImGui::OpenPopup("disconnected");
+
 	// Check if an automatic connection has started
-	if ((async_session.valid() || next_scene) and not ImGui::IsPopupOpen("connecting"))
+	if ((async_session.valid() || next_scene) and not ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopup))
 		ImGui::OpenPopup("connecting");
 
 	const auto & popup_layer = imgui_ctx->layers()[1];
@@ -513,6 +549,13 @@ void scenes::lobby::gui_server_list()
 			gui_enter_pin(pin_request);
 		else
 			gui_connecting(pin_request);
+		ImGui::EndPopup();
+	}
+
+	ImGui::SetNextWindowPos({popup_layer_center.x, popup_layer_center.y}, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+	if (ImGui::BeginPopupModal("disconnected", nullptr, ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove | ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		gui_disconnected();
 		ImGui::EndPopup();
 	}
 
@@ -576,10 +619,10 @@ void scenes::lobby::gui_settings()
 		const auto & refresh_rates = session.get_refresh_rates();
 		if (not refresh_rates.empty())
 		{
-			float active_rate = config.preferred_refresh_rate.value_or(refresh_rates.back());
+			float active_rate = config.preferred_refresh_rate;
 			if (ImGui::BeginCombo(_S("Refresh rate"), active_rate ? fmt::format("{}", active_rate).c_str() : _cS("automatic refresh rate", "Automatic")))
 			{
-				if (ImGui::Selectable(_cS("automatic refresh rate", "Automatic"), config.preferred_refresh_rate == 0, ImGuiSelectableFlags_SelectOnRelease))
+				if (ImGui::Selectable(_cS("automatic refresh rate", "Automatic"), active_rate == 0, ImGuiSelectableFlags_SelectOnRelease))
 				{
 					session.set_refresh_rate(0);
 					config.preferred_refresh_rate = 0;
@@ -589,7 +632,7 @@ void scenes::lobby::gui_settings()
 					imgui_ctx->tooltip(_("Select refresh rate based on measured application performance.\nMay cause flicker when a change happens."));
 				for (float rate: refresh_rates)
 				{
-					if (ImGui::Selectable(fmt::format("{}", rate).c_str(), rate == config.preferred_refresh_rate, ImGuiSelectableFlags_SelectOnRelease))
+					if (ImGui::Selectable(fmt::format("{}", rate).c_str(), rate == active_rate, ImGuiSelectableFlags_SelectOnRelease))
 					{
 						session.set_refresh_rate(rate);
 						config.preferred_refresh_rate = rate;
@@ -600,7 +643,7 @@ void scenes::lobby::gui_settings()
 			}
 			imgui_ctx->vibrate_on_hover();
 
-			if (config.preferred_refresh_rate == 0 and refresh_rates.size() > 2)
+			if (active_rate == 0 and refresh_rates.size() > 2)
 			{
 				float min_rate = config.minimum_refresh_rate.value_or(refresh_rates.front());
 				if (ImGui::BeginCombo(_S("Minimum refresh rate"), fmt::format("{}", min_rate).c_str()))
@@ -618,31 +661,6 @@ void scenes::lobby::gui_settings()
 				imgui_ctx->vibrate_on_hover();
 			}
 		}
-	}
-
-	if (foveation)
-	{
-		std::array<const char *, 4> foveation_levels = {
-		        gettext_noop_context("Foveation level", "None"),
-		        gettext_noop_context("Foveation level", "Low"),
-		        gettext_noop_context("Foveation level", "Medium"),
-		        gettext_noop_context("Foveation level", "High"),
-		};
-
-		if (ImGui::BeginCombo(_S("Foveation level"), _cS("Foveation level", foveation_levels[(int)foveation->level()])))
-		{
-			for (int level = 0; level < foveation_levels.size(); level++)
-			{
-				if (ImGui::Selectable(_cS("Foveation level", foveation_levels[level]), (int)foveation->level() == level))
-				{
-					foveation = xr::foveation_profile{instance, session, (XrFoveationLevelFB)level, -10, false};
-					// TODO save in configuration
-				}
-			}
-
-			ImGui::EndCombo();
-		}
-		imgui_ctx->vibrate_on_hover();
 	}
 
 	// Render resolution
@@ -729,7 +747,7 @@ void scenes::lobby::gui_settings()
 				config.codec = std::nullopt;
 				config.save();
 			}
-			for (auto codec: supported_codecs)
+			for (auto codec: decoder::supported_codecs())
 			{
 				// don't show raw in GUI
 				if (codec == wivrn::raw)
@@ -1034,7 +1052,7 @@ void scenes::lobby::gui_debug_node_hierarchy(entt::entity root)
 							        primitive.vertex_count,
 							        primitive.material_->name,
 							        primitive.vertex_shader,
-							        primitive.material_->fragment_shader_name);
+							        primitive.material_->fragment_shader);
 
 							imgui_ctx->tooltip(tooltip);
 						}

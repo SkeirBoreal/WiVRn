@@ -1243,10 +1243,6 @@ void application::initialize()
 	        XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME,
 	        XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME,
 	        XR_FB_FACE_TRACKING2_EXTENSION_NAME,
-	        // Disable foveation, doesn't seem useful
-	        // XR_FB_FOVEATION_CONFIGURATION_EXTENSION_NAME,
-	        // XR_FB_FOVEATION_EXTENSION_NAME,
-	        // XR_FB_FOVEATION_VULKAN_EXTENSION_NAME,
 	        XR_FB_PASSTHROUGH_EXTENSION_NAME,
 	        XR_FB_SWAPCHAIN_UPDATE_STATE_EXTENSION_NAME,
 
@@ -1340,7 +1336,7 @@ void application::initialize()
 	spaces[size_t(xr::spaces::view)] = xr_session.create_reference_space(XR_REFERENCE_SPACE_TYPE_VIEW);
 	spaces[size_t(xr::spaces::world)] = xr_session.create_reference_space(XR_REFERENCE_SPACE_TYPE_STAGE);
 
-	config.emplace(xr_system_id);
+	config.emplace(xr_system_id, xr_session);
 
 	// HTC face tracker fails if created later
 	// we can destroy it right away, it actually stores static handles

@@ -173,6 +173,19 @@ enum video_codec
 	raw,
 };
 
+enum class stream_tab : uint8_t
+{
+	hidden,
+	overlay_only,
+	compact,
+	stats,
+	settings,
+	bitrate_settings,
+	foveation_settings,
+	applications,
+	application_launcher,
+};
+
 struct audio_data
 {
 	XrTime timestamp;
@@ -512,6 +525,11 @@ struct user_presence_changed
 	bool present;
 };
 
+struct stream_tab_changed
+{
+	stream_tab tab;
+};
+
 struct override_foveation_center
 {
 	bool enabled;
@@ -565,6 +583,7 @@ using packets = std::variant<
         refresh_rate_changed,
         session_state_changed,
         user_presence_changed,
+        stream_tab_changed,
         override_foveation_center,
         get_application_list,
         start_app,
@@ -608,6 +627,22 @@ struct handshake
 	int stream_port;
 };
 
+struct server_message
+{
+	enum class kind : uint8_t
+	{
+		// in-stream toasts (not buffered)
+		toast,
+		toast_urgent,
+
+		// displayed in lobby after disconnect (buffered)
+		error,
+	};
+
+	kind kind;
+	std::string msg;
+};
+
 struct foveation_parameter
 {
 	// The number of source pixels for each ratio,
@@ -643,6 +678,8 @@ struct video_stream_description
 	uint16_t height;
 	std::array<video_codec, 3> codec; // left, right, alpha
 	float fps;
+
+	bool operator==(const video_stream_description &) const = default;
 };
 
 class video_stream_data_shard
@@ -730,6 +767,11 @@ struct refresh_rate_change
 	float fps;
 };
 
+struct stream_tab_change
+{
+	stream_tab tab;
+};
+
 struct application_list
 {
 	std::string language;
@@ -766,6 +808,7 @@ using packets = std::variant<
         pin_check_2,
         pin_check_4,
         handshake,
+        server_message,
         audio_stream_description,
         video_stream_description,
         audio_data,
@@ -775,6 +818,7 @@ using packets = std::variant<
         tracking_control,
         feature_control,
         refresh_rate_change,
+        stream_tab_change,
         application_list,
         application_icon,
         running_applications>;

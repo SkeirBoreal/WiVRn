@@ -31,8 +31,9 @@
 
 namespace xr
 {
+class session;
 class system;
-}
+} // namespace xr
 
 class configuration
 {
@@ -48,7 +49,7 @@ public:
 	};
 
 	std::map<std::string, server_data> servers;
-	std::optional<float> preferred_refresh_rate;
+	float preferred_refresh_rate = 0;
 	std::optional<float> minimum_refresh_rate;
 	float resolution_scale = 1.0;
 	std::optional<wivrn::video_codec> codec;
@@ -76,7 +77,7 @@ public:
 	std::string environment_model = "assets://ground.glb";
 
 	bool override_foveation_enable = false;
-	float override_foveation_pitch = 10 * M_PI / 180;
+	float override_foveation_pitch = -10 * M_PI / 180;
 	float override_foveation_distance = 3;
 
 	bool high_power_mode;
@@ -99,7 +100,7 @@ private:
 	void parse_openxr_post_processing_options(simdjson::simdjson_result<simdjson::dom::object> root);
 
 public:
-	configuration(xr::system &);
+	configuration(xr::system &, xr::session &);
 	configuration() = default;
 
 	void save();
